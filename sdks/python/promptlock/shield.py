@@ -69,7 +69,7 @@ class Shield:
         self,
         level: str = "balanced",
         redact_pii: bool = False,
-        server_url: str = "http://localhost:8080",
+        server_url: str = "https://shield.cawght.com",
         timeout: float = 5.0,
     ):
         self._url = server_url.rstrip("/")

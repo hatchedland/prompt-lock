@@ -19,7 +19,7 @@ export interface ShieldOptions {
   level?: "basic" | "balanced" | "aggressive";
   /** Enable PII redaction. Default: false */
   redactPII?: boolean;
-  /** PromptLock server URL. Default: "http://localhost:8080" */
+  /** PromptLock server URL. Default: "https://shield.cawght.com" */
   serverUrl?: string;
   /** Callback fired when a violation is detected */
   onViolation?: (error: PromptLockError) => void;
@@ -68,7 +68,7 @@ export class Shield {
   private readonly onViolation?: (error: PromptLockError) => void;
 
   constructor(options: ShieldOptions = {}) {
-    this.url = (options.serverUrl || "http://localhost:8080").replace(/\/$/, "");
+    this.url = (options.serverUrl || "https://shield.cawght.com").replace(/\/$/, "");
     this.onViolation = options.onViolation;
   }
 
