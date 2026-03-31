@@ -1,6 +1,6 @@
 {
-  "name": "promptlock",
-  "version": "1.0.3",
+  "name": "prompt-lock",
+  "version": "1.0.0",
   "description": "Anti-prompt injection SDK for LLM applications",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

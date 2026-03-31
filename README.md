@@ -55,7 +55,7 @@ clean = shield.verify_context(rag_chunks)     # filters malicious RAG context
 ### TypeScript
 
 ```bash
-npm install promptlock
+npm install prompt-lock
 ```
 
 ```typescript
@@ -142,7 +142,7 @@ promptlock/           Go SDK (core engine)
 ├── gateway/          API auth, rate limiting, metering (SaaS mode)
 └── sdks/
     ├── python/       pip install promptlock
-    └── typescript/   npm install promptlock
+    └── typescript/   npm install prompt-lock
 ```
 
 ## Self-Hosted Server
