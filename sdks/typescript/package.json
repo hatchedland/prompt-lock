@@ -12,6 +12,14 @@
   "devDependencies": {
     "typescript": "^5.0.0"
   },
+  "homepage": "https://cawght.com/shield",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hatchedland/prompt-lock"
+  },
+  "keywords": ["prompt-injection", "llm", "security", "ai-safety", "promptlock"],
+  "author": "Cawght (https://cawght.com)",
+  "license": "MIT",
   "engines": {
     "node": ">=18.0.0"
   }
