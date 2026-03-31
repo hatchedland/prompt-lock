@@ -3,7 +3,7 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "promptlock"
+name = "promptlock-ai"
 version = "1.0.0"
 description = "Anti-prompt injection SDK for LLM applications"
 readme = "README.md"
