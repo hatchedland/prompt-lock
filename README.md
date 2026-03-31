@@ -40,7 +40,7 @@ if err != nil {
 ### Python
 
 ```bash
-pip install prompt-lock-sdk
+pip install promptlock-py
 ```
 
 ```python
@@ -141,7 +141,7 @@ promptlock/           Go SDK (core engine)
 ├── server/           REST + gRPC server
 ├── gateway/          API auth, rate limiting, metering (SaaS mode)
 └── sdks/
-    ├── python/       pip install prompt-lock-sdk
+    ├── python/       pip install promptlock-py
     └── typescript/   npm install @hatchedland/prompt-lock
 ```
 
