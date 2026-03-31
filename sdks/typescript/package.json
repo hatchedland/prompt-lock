@@ -1,5 +1,5 @@
 {
-  "name": "@rajanydv/prompt-lock",
+  "name": "promptlock-js",
   "version": "1.0.0",
   "description": "Anti-prompt injection SDK for LLM applications",
   "main": "dist/index.js",
