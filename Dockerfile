@@ -1,16 +1,19 @@
-FROM golang:1.22-alpine AS builder
+FROM golang:1.24-alpine AS builder
+
+RUN apk add --no-cache gcc musl-dev
 
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /promptlock-server ./cmd/promptlock-server/
+RUN CGO_ENABLED=1 go build -ldflags="-s -w" -o /promptlock-server ./cmd/promptlock-server/
 
-FROM gcr.io/distroless/static-debian12
+FROM alpine:3.20
 
+RUN apk add --no-cache ca-certificates
 COPY --from=builder /promptlock-server /promptlock-server
 
-EXPOSE 8080 50051
+EXPOSE 8080
 
 ENTRYPOINT ["/promptlock-server"]
-CMD ["--http-port", "8080", "--grpc-port", "50051", "--level", "balanced"]
+CMD ["--http-port", "8080", "--level", "balanced", "--redact-pii"]
