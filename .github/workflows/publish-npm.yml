@@ -21,7 +21,7 @@ jobs:
       - name: Build
         working-directory: sdks/typescript
         run: |
-          npm ci
+          npm install
           npm run build
 
       - name: Publish
