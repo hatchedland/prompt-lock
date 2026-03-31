@@ -2,17 +2,25 @@
 
 Usage:
     from promptlock import Shield
-
     shield = Shield(level="balanced", redact_pii=True)
-    safe_query = shield.protect(user_query)
+    safe = shield.protect(user_input)
 
-With vector similarity (requires Ollama):
-    from promptlock import Shield, ollama_embedder
+With vector similarity + judge (requires Ollama):
+    from promptlock import Shield, ollama_embedder, ollama_judge
+    shield = Shield(embedder=ollama_embedder(), judge=ollama_judge())
 
-    shield = Shield(embedder=ollama_embedder())
+With HTTP interceptor:
+    from promptlock import Shield, Interceptor
+    session = Interceptor(Shield()).session()
 """
 
-from promptlock.shield import Shield, PromptLockError, ScanResult, Violation, ollama_embedder, cosine_similarity
+from promptlock.shield import (
+    Shield, PromptLockError, ScanResult, Violation,
+    ollama_embedder, ollama_judge, cosine_similarity, Interceptor,
+)
 
-__all__ = ["Shield", "PromptLockError", "ScanResult", "Violation", "ollama_embedder", "cosine_similarity"]
-__version__ = "1.1.0"
+__all__ = [
+    "Shield", "PromptLockError", "ScanResult", "Violation",
+    "ollama_embedder", "ollama_judge", "cosine_similarity", "Interceptor",
+]
+__version__ = "1.2.0"
