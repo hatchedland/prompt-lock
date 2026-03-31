@@ -1,10 +1,10 @@
 {
   "name": "promptlock",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Anti-prompt injection SDK for LLM applications",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
+  "files": ["dist", "src/patterns.json"],
   "scripts": {
     "build": "tsc",
     "prepublishOnly": "npm run build"
