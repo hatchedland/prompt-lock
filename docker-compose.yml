@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+  promptlock:
+    build: .
+    ports:
+      - "8080:8080"
+      - "50051:50051"
+    command:
+      - --http-port=8080
+      - --grpc-port=50051
+      - --level=balanced
+      - --redact-pii

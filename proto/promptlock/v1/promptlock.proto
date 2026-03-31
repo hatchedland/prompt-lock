@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+package promptlock.v1;
+
+option go_package = "github.com/rajanyadav/promptlock/gen/promptlock/v1;promptlockv1";
+
+// PromptLockService provides prompt injection detection and input sanitization.
+service PromptLockService {
+  // Protect scans input for prompt injections and returns sanitized output.
+  // Returns an error with violation details if the input is blocked.
+  rpc Protect(ProtectRequest) returns (ProtectResponse);
+
+  // ProtectWithResult returns full scan details including violations,
+  // PII redactions, score, and verdict.
+  rpc ProtectWithResult(ProtectRequest) returns (ScanResultResponse);
+
+  // VerifyContext scans RAG-retrieved context chunks for indirect injections.
+  // Malicious chunks are silently filtered out.
+  rpc VerifyContext(VerifyContextRequest) returns (VerifyContextResponse);
+}
+
+message ProtectRequest {
+  string input = 1;
+}
+
+message ProtectResponse {
+  string output = 1;
+  bool blocked = 2;
+  int32 score = 3;
+  string verdict = 4;
+  repeated Violation violations = 5;
+}
+
+message ScanResultResponse {
+  string output = 1;
+  bool clean = 2;
+  int32 score = 3;
+  string verdict = 4;
+  repeated Violation violations = 5;
+  repeated RedactedEntity redactions = 6;
+  string delimiter = 7;
+  int64 latency_ms = 8;
+}
+
+message Violation {
+  string rule = 1;
+  string category = 2;
+  string severity = 3;
+  string matched = 4;
+  double confidence = 5;
+  int32 offset = 6;
+  int32 weight = 7;
+}
+
+// RedactedEntity represents a PII entity that was redacted.
+// Note: the original value is intentionally NOT included — PII must not traverse the wire.
+message RedactedEntity {
+  string type = 1;
+  string placeholder = 2;
+  int32 offset = 3;
+  int32 length = 4;
+}
+
+message VerifyContextRequest {
+  repeated string chunks = 1;
+}
+
+message VerifyContextResponse {
+  repeated string clean_chunks = 1;
+  int32 blocked_count = 2;
+}

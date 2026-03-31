@@ -1,0 +1,41 @@
+# Binaries
+*.exe
+*.dll
+*.so
+*.dylib
+/promptlock-server
+
+# Test/build artifacts
+*.test
+*.out
+coverage.html
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Internal / Private
+CLAUDE.md
+.claude/
+docs/
+modules/
+adversarial_test.go
+
+# Dependencies (downloaded by go mod)
+vendor/
+
+# Node
+sdks/typescript/node_modules/
+sdks/typescript/dist/
+
+# Python
+sdks/python/__pycache__/
+sdks/python/*.egg-info/
+sdks/python/dist/
+sdks/python/build/
