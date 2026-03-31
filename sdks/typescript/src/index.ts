@@ -3,21 +3,31 @@
  *
  * @example
  * ```ts
- * import { Shield } from 'promptlock';
+ * import { Shield } from '@hatchedland/prompt-lock';
  *
  * const shield = new Shield({ level: 'balanced', redactPII: true });
+ * const safe = shield.protect(userInput);
+ * const clean = shield.verifyContext(ragChunks);
+ * ```
  *
- * const safe = await shield.protect(userInput);
- * const clean = await shield.verifyContext(ragChunks);
+ * With vector similarity (requires Ollama):
+ * ```ts
+ * import { Shield, ollamaEmbedder } from '@hatchedland/prompt-lock';
+ * const shield = new Shield({ embedder: ollamaEmbedder() });
  * ```
  */
 
 import patterns from "./patterns.json";
+import corpus from "./corpus.json";
 
 export interface ShieldOptions {
   level?: "basic" | "balanced" | "aggressive";
   redactPII?: boolean;
   onViolation?: (error: PromptLockError) => void;
+  /** Embedding function for vector similarity. Signature: (text) => Promise<number[]> */
+  embedder?: (text: string) => Promise<number[]>;
+  /** Cosine similarity threshold. Default: 0.82 */
+  similarityThreshold?: number;
 }
 
 export interface Violation {
@@ -69,9 +79,7 @@ function shouldStrip(cp: number): boolean {
 }
 
 function sanitize(text: string): string {
-  // NFKC normalization
   let result = text.normalize("NFKC");
-  // Strip invisible characters (preserve \t \n \r)
   let out = "";
   for (const ch of result) {
     const cp = ch.codePointAt(0)!;
@@ -99,7 +107,6 @@ interface RedactedEntity {
 
 function redactPII(text: string): { output: string; redactions: RedactedEntity[] } {
   const matches: { start: number; end: number; type: string; value: string }[] = [];
-
   for (const [type, pattern] of PII_PATTERNS) {
     const re = new RegExp(pattern.source, pattern.flags);
     let m: RegExpExecArray | null;
@@ -107,24 +114,16 @@ function redactPII(text: string): { output: string; redactions: RedactedEntity[]
       matches.push({ start: m.index, end: m.index + m[0].length, type, value: m[0] });
     }
   }
-
   if (matches.length === 0) return { output: text, redactions: [] };
-
-  // Sort by position, remove overlaps
   matches.sort((a, b) => a.start - b.start || (b.end - b.start) - (a.end - a.start));
   const filtered: typeof matches = [];
   let lastEnd = 0;
   for (const m of matches) {
-    if (m.start >= lastEnd) {
-      filtered.push(m);
-      lastEnd = m.end;
-    }
+    if (m.start >= lastEnd) { filtered.push(m); lastEnd = m.end; }
   }
-
   const counters: Record<string, number> = {};
   const valueMap: Record<string, string> = {};
   const redactions: RedactedEntity[] = [];
-
   let result = text;
   for (let i = filtered.length - 1; i >= 0; i--) {
     const { start, end, type, value } = filtered[i];
@@ -136,11 +135,41 @@ function redactPII(text: string): { output: string; redactions: RedactedEntity[]
     result = result.slice(0, start) + placeholder + result.slice(end);
     redactions.unshift({ type, placeholder, offset: start, length: end - start });
   }
-
   return { output: result, redactions };
 }
 
-// --- Severity helpers ---
+// --- Vector Similarity ---
+
+export function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  if (normA === 0 || normB === 0) return 0;
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+/** Create an embedder function using a local Ollama instance. */
+export function ollamaEmbedder(
+  model = "nomic-embed-text",
+  endpoint = "http://localhost:11434"
+): (text: string) => Promise<number[]> {
+  return async (text: string): Promise<number[]> => {
+    const resp = await fetch(`${endpoint}/api/embeddings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model, prompt: text }),
+    });
+    if (!resp.ok) throw new Error(`Ollama: ${resp.status}`);
+    const data = await resp.json();
+    return data.embedding;
+  };
+}
+
+// --- Helpers ---
 
 const SEVERITY_RANK: Record<string, number> = { low: 0, medium: 1, high: 2, critical: 3 };
 const SEVERITY_CONFIDENCE: Record<string, number> = { critical: 0.95, high: 0.85, medium: 0.70, low: 0.50 };
@@ -157,7 +186,7 @@ function isBlocked(level: string, verdict: string): boolean {
   const idx = verdicts.indexOf(verdict);
   if (level === "basic") return idx >= 3;
   if (level === "balanced") return idx >= 2;
-  return idx >= 1; // aggressive
+  return idx >= 1;
 }
 
 // --- Compiled rule ---
@@ -177,39 +206,59 @@ export class Shield {
   private readonly pii: boolean;
   private readonly onViolation?: (error: PromptLockError) => void;
   private readonly rules: CompiledRule[];
+  private readonly embedder?: (text: string) => Promise<number[]>;
+  private readonly threshold: number;
+  private readonly corpusSamples: Array<{ text: string; label: string; category: string }>;
+  private corpusEmbeddings: Array<{ sample: { label: string; category: string }; embedding: number[] }> | null = null;
 
   constructor(options: ShieldOptions = {}) {
     this.level = options.level || "balanced";
     this.pii = options.redactPII || false;
     this.onViolation = options.onViolation;
+    this.embedder = options.embedder;
+    this.threshold = options.similarityThreshold || 0.82;
 
-    // Load and compile patterns once
+    // Load and compile patterns
     this.rules = [];
     for (const p of (patterns as any).patterns) {
       if (!p.enabled) continue;
       try {
+        // Convert Go/PCRE (?i) flag to JS RegExp "i" flag
+        let regex = p.regex as string;
+        let flags = "";
+        if (regex.startsWith("(?i)")) {
+          regex = regex.slice(4);
+          flags = "i";
+        }
         this.rules.push({
           id: p.id,
-          compiled: new RegExp(p.regex),
+          compiled: new RegExp(regex, flags),
           category: p.category,
           severity: p.severity,
           weight: p.weight,
         });
-      } catch {
-        // Skip invalid regex
-      }
+      } catch { /* skip invalid regex */ }
     }
-
-    // Sort by severity descending
     this.rules.sort((a, b) => (SEVERITY_RANK[b.severity] || 0) - (SEVERITY_RANK[a.severity] || 0));
+
+    // Load corpus for vector similarity
+    this.corpusSamples = this.embedder ? (corpus as any) : [];
   }
 
-  /**
-   * Scan input for prompt injections. Returns sanitized output.
-   * @throws {PromptLockError} If the input is blocked.
-   */
+  private async initVectors(): Promise<void> {
+    if (this.corpusEmbeddings !== null || !this.embedder) return;
+    this.corpusEmbeddings = [];
+    for (const sample of this.corpusSamples) {
+      try {
+        const embedding = await this.embedder(sample.text);
+        this.corpusEmbeddings.push({ sample, embedding });
+      } catch { /* skip failed embeddings */ }
+    }
+  }
+
+  /** Scan input. Returns sanitized output. Throws PromptLockError if blocked. */
   protect(input: string): string {
-    const result = this.run(input);
+    const result = this.runSync(input);
     if (isBlocked(this.level, result.verdict)) {
       const err = new PromptLockError(result.score, result.verdict, result.violations);
       this.onViolation?.(err);
@@ -218,38 +267,101 @@ export class Shield {
     return result.output;
   }
 
-  /** Scan input and return full scan details. */
-  protectDetailed(input: string): ScanResult {
-    return this.run(input);
+  /** Scan input with vector similarity (async). Throws PromptLockError if blocked. */
+  async protectAsync(input: string): Promise<string> {
+    const result = await this.runAsync(input);
+    if (isBlocked(this.level, result.verdict)) {
+      const err = new PromptLockError(result.score, result.verdict, result.violations);
+      this.onViolation?.(err);
+      throw err;
+    }
+    return result.output;
   }
 
-  /** Verify RAG context chunks. Malicious chunks are filtered out. */
+  /** Return full scan details (sync, regex only). */
+  protectDetailed(input: string): ScanResult {
+    return this.runSync(input);
+  }
+
+  /** Return full scan details with vector similarity (async). */
+  async protectDetailedAsync(input: string): Promise<ScanResult> {
+    return this.runAsync(input);
+  }
+
+  /** Filter malicious RAG chunks (sync). */
   verifyContext(chunks: string[]): string[] {
     return chunks
-      .map((chunk) => this.run(chunk))
-      .filter((result) => !isBlocked(this.level, result.verdict))
-      .map((result) => result.output);
+      .map((c) => this.runSync(c))
+      .filter((r) => !isBlocked(this.level, r.verdict))
+      .map((r) => r.output);
   }
 
-  private run(input: string): ScanResult {
+  /** Filter malicious RAG chunks with vector similarity (async). */
+  async verifyContextAsync(chunks: string[]): Promise<string[]> {
+    const results = await Promise.all(chunks.map((c) => this.runAsync(c)));
+    return results.filter((r) => !isBlocked(this.level, r.verdict)).map((r) => r.output);
+  }
+
+  /** Sync run — regex + PII only. */
+  private runSync(input: string): ScanResult {
     const start = performance.now();
-
-    // 1. Sanitize
     const sanitized = sanitize(input);
+    const violations = this.detectPatterns(sanitized);
+    const score = violations.reduce((s, v) => s + v.weight, 0);
+    const verdict = verdictFromScore(score);
+    let output = sanitized;
+    let redactions: RedactedEntity[] = [];
+    if (this.pii) { const r = redactPII(output); output = r.output; redactions = r.redactions; }
+    return { output, clean: verdict === "clean", score, verdict, violations, redactions, latencyMs: Math.round((performance.now() - start) * 100) / 100 };
+  }
 
-    // 2. Detect
+  /** Async run — regex + vector similarity + PII. */
+  private async runAsync(input: string): Promise<ScanResult> {
+    const start = performance.now();
+    const sanitized = sanitize(input);
+    const violations = this.detectPatterns(sanitized);
+
+    // Vector similarity
+    if (this.embedder) {
+      await this.initVectors();
+      try {
+        const inputEmb = await this.embedder(sanitized);
+        const seen = new Set<string>();
+        for (const { sample, embedding } of this.corpusEmbeddings || []) {
+          const sim = cosineSimilarity(inputEmb, embedding);
+          if (sim < this.threshold) continue;
+          const ruleId = `VECTOR_${sample.label}`;
+          if (seen.has(ruleId)) continue;
+          seen.add(ruleId);
+          violations.push({
+            rule: ruleId,
+            category: sample.category || "injection",
+            severity: "high",
+            matched: `similar to ${sample.label} (${Math.round(sim * 100)}%)`,
+            confidence: sim,
+            weight: Math.round(sim * 70),
+          });
+        }
+      } catch { /* vector detection failure is non-fatal */ }
+    }
+
+    const score = violations.reduce((s, v) => s + v.weight, 0);
+    const verdict = verdictFromScore(score);
+    let output = sanitized;
+    let redactions: RedactedEntity[] = [];
+    if (this.pii) { const r = redactPII(output); output = r.output; redactions = r.redactions; }
+    return { output, clean: verdict === "clean", score, verdict, violations, redactions, latencyMs: Math.round((performance.now() - start) * 100) / 100 };
+  }
+
+  /** Pattern detection (shared by sync and async). */
+  private detectPatterns(sanitized: string): Violation[] {
     const violations: Violation[] = [];
     for (const rule of this.rules) {
       if (this.level === "basic" && (SEVERITY_RANK[rule.severity] || 0) < 2) continue;
-
       const m = rule.compiled.exec(sanitized);
       if (!m) continue;
-
       let matched = m[0];
-      if (matched.length > 100) {
-        matched = matched.slice(0, 50) + "..." + matched.slice(-50);
-      }
-
+      if (matched.length > 100) matched = matched.slice(0, 50) + "..." + matched.slice(-50);
       violations.push({
         rule: rule.id,
         category: rule.category,
@@ -258,27 +370,8 @@ export class Shield {
         confidence: SEVERITY_CONFIDENCE[rule.severity] || 0.5,
         weight: rule.weight,
       });
-
-      if (rule.severity === "critical" && (this.level === "basic" || this.level === "aggressive")) {
-        break;
-      }
+      if (rule.severity === "critical" && (this.level === "basic" || this.level === "aggressive")) break;
     }
-
-    // 3. Score
-    const score = violations.reduce((sum, v) => sum + v.weight, 0);
-    const verdict = verdictFromScore(score);
-
-    // 4. PII
-    let output = sanitized;
-    let redactions: RedactedEntity[] = [];
-    if (this.pii) {
-      const r = redactPII(output);
-      output = r.output;
-      redactions = r.redactions;
-    }
-
-    const latencyMs = Math.round((performance.now() - start) * 100) / 100;
-
-    return { output, clean: verdict === "clean", score, verdict, violations, redactions, latencyMs };
+    return violations;
   }
 }

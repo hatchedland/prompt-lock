@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Optional
 
 
 @dataclass
@@ -46,18 +48,11 @@ class PromptLockError(Exception):
 
 # --- Sanitizer ---
 
-# Zero-width and invisible character ranges to strip
 _INVISIBLE_RANGES = [
-    (0x0000, 0x0008),   # C0 control (before \t)
-    (0x000B, 0x000C),   # VT, FF
-    (0x000E, 0x001F),   # C0 control (after \r)
-    (0x007F, 0x009F),   # Delete + C1 control
-    (0x200B, 0x200D),   # Zero-width space/joiner
-    (0x202A, 0x202E),   # Bidi overrides
-    (0x2066, 0x2069),   # Bidi isolates
-    (0xFE00, 0xFE0F),   # Variation selectors
-    (0xFEFF, 0xFEFF),   # BOM
-    (0xE0001, 0xE007F), # Tag characters
+    (0x0000, 0x0008), (0x000B, 0x000C), (0x000E, 0x001F),
+    (0x007F, 0x009F), (0x200B, 0x200D), (0x202A, 0x202E),
+    (0x2066, 0x2069), (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF),
+    (0xE0001, 0xE007F),
 ]
 
 
@@ -70,10 +65,7 @@ def _should_strip(c: str) -> bool:
 
 
 def _sanitize(text: str) -> str:
-    """Unicode NFKC normalization + invisible character stripping."""
-    # NFKC normalization (handles homoglyphs, fullwidth, ligatures)
     text = unicodedata.normalize("NFKC", text)
-    # Strip invisible characters (preserve \t \n \r)
     text = "".join(c for c in text if not _should_strip(c))
     return text
 
@@ -90,20 +82,15 @@ _PII_PATTERNS = [
 
 
 def _redact_pii(text: str) -> tuple[str, list[dict]]:
-    """Detect and replace PII with placeholders."""
     entities = []
     counters: dict[str, int] = {}
     value_map: dict[str, str] = {}
-
     matches = []
     for pii_type, pattern in _PII_PATTERNS:
         for m in pattern.finditer(text):
             matches.append((m.start(), m.end(), pii_type, m.group()))
-
     if not matches:
         return text, []
-
-    # Sort by position, remove overlaps
     matches.sort(key=lambda x: (x[0], -(x[1] - x[0])))
     filtered = []
     last_end = 0
@@ -111,8 +98,6 @@ def _redact_pii(text: str) -> tuple[str, list[dict]]:
         if start >= last_end:
             filtered.append((start, end, pii_type, value))
             last_end = end
-
-    # Replace from end to preserve offsets
     result = text
     for start, end, pii_type, value in reversed(filtered):
         if value not in value_map:
@@ -120,21 +105,61 @@ def _redact_pii(text: str) -> tuple[str, list[dict]]:
             value_map[value] = f"[{pii_type}_{counters[pii_type]}]"
         placeholder = value_map[value]
         result = result[:start] + placeholder + result[end:]
-        entities.append({
-            "type": pii_type,
-            "placeholder": placeholder,
-            "offset": start,
-            "length": end - start,
-        })
-
+        entities.append({"type": pii_type, "placeholder": placeholder, "offset": start, "length": end - start})
     entities.reverse()
     return result, entities
+
+
+# --- Vector Similarity ---
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Compute cosine similarity between two vectors."""
+    if len(a) != len(b) or len(a) == 0:
+        return 0.0
+    dot = sum(ai * bi for ai, bi in zip(a, b))
+    norm_a = math.sqrt(sum(ai * ai for ai in a))
+    norm_b = math.sqrt(sum(bi * bi for bi in b))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+def _load_corpus() -> list[dict]:
+    """Load embedded attack corpus for vector similarity."""
+    corpus_file = Path(__file__).parent / "corpus.json"
+    if not corpus_file.exists():
+        return []
+    with open(corpus_file) as f:
+        return json.load(f)
+
+
+# --- Ollama Embedder ---
+
+def ollama_embedder(model: str = "nomic-embed-text", endpoint: str = "http://localhost:11434") -> Callable[[str], list[float]]:
+    """Create an embedder function that uses a local Ollama instance.
+
+    Usage:
+        shield = Shield(embedder=ollama_embedder())
+    """
+    import urllib.request
+
+    def embed(text: str) -> list[float]:
+        body = json.dumps({"model": model, "prompt": text}).encode()
+        req = urllib.request.Request(
+            f"{endpoint}/api/embeddings",
+            data=body,
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read())
+        return data["embedding"]
+
+    return embed
 
 
 # --- Pattern Loading ---
 
 def _load_patterns() -> list[dict]:
-    """Load embedded attack patterns."""
     patterns_file = Path(__file__).parent / "patterns.json"
     with open(patterns_file) as f:
         data = json.load(f)
@@ -161,10 +186,10 @@ def _is_blocked(level: str, verdict: str) -> bool:
     verdicts = ["clean", "suspicious", "likely", "malicious"]
     v_idx = verdicts.index(verdict) if verdict in verdicts else 0
     if level == "basic":
-        return v_idx >= 3  # malicious only
+        return v_idx >= 3
     if level == "balanced":
-        return v_idx >= 2  # likely+
-    return v_idx >= 1  # suspicious+ (aggressive)
+        return v_idx >= 2
+    return v_idx >= 1
 
 
 # --- Shield ---
@@ -175,20 +200,34 @@ class Shield:
     Args:
         level: Security level — "basic", "balanced", or "aggressive".
         redact_pii: Enable PII redaction (email, phone, SSN, etc.).
+        embedder: Optional embedding function for vector similarity detection.
+                  Signature: (text: str) -> list[float].
+                  Use ollama_embedder() for local Ollama.
+        similarity_threshold: Cosine similarity threshold for vector matches. Default: 0.82.
 
     Usage:
-        shield = Shield(level="balanced", redact_pii=True)
+        # Regex only (default)
+        shield = Shield(level="balanced")
 
-        safe = shield.protect(user_input)
-        clean = shield.verify_context(rag_chunks)
+        # With vector similarity (requires Ollama)
+        from promptlock import Shield, ollama_embedder
+        shield = Shield(embedder=ollama_embedder())
     """
 
-    def __init__(self, level: str = "balanced", redact_pii: bool = False):
+    def __init__(
+        self,
+        level: str = "balanced",
+        redact_pii: bool = False,
+        embedder: Optional[Callable[[str], list[float]]] = None,
+        similarity_threshold: float = 0.82,
+    ):
         self._level = level
         self._redact_pii = redact_pii
         self._on_violation = None
+        self._embedder = embedder
+        self._threshold = similarity_threshold
 
-        # Load and compile patterns once
+        # Load and compile regex patterns
         raw = _load_patterns()
         self._rules = []
         for p in raw:
@@ -205,9 +244,23 @@ class Shield:
                 "severity": p["severity"],
                 "weight": p["weight"],
             })
-
-        # Sort by severity descending (critical first)
         self._rules.sort(key=lambda r: -_SEVERITY_RANK.get(r["severity"], 0))
+
+        # Vector similarity state (lazy init)
+        self._corpus = _load_corpus() if embedder else []
+        self._corpus_embeddings: list[tuple[dict, list[float]]] | None = None
+
+    def _init_vectors(self):
+        """Lazy-initialize corpus embeddings on first use."""
+        if self._corpus_embeddings is not None:
+            return
+        self._corpus_embeddings = []
+        for sample in self._corpus:
+            try:
+                emb = self._embedder(sample["text"])
+                self._corpus_embeddings.append((sample, emb))
+            except Exception:
+                continue
 
     def protect(self, input: str) -> str:
         """Scan input for prompt injections. Returns sanitized output.
@@ -251,22 +304,17 @@ class Shield:
         # 1. Sanitize
         sanitized = _sanitize(input)
 
-        # 2. Detect
+        # 2. Pattern detection
         violations = []
         for rule in self._rules:
-            # Basic mode: skip below high
             if self._level == "basic" and _SEVERITY_RANK.get(rule["severity"], 0) < 2:
                 continue
-
             m = rule["compiled"].search(sanitized)
             if not m:
                 continue
-
             matched = m.group()
             if len(matched) > 100:
-                half = 50
-                matched = matched[:half] + "..." + matched[-half:]
-
+                matched = matched[:50] + "..." + matched[-50:]
             violations.append(Violation(
                 rule=rule["id"],
                 category=rule["category"],
@@ -275,16 +323,39 @@ class Shield:
                 confidence=_SEVERITY_CONFIDENCE.get(rule["severity"], 0.5),
                 weight=rule["weight"],
             ))
-
-            # Short-circuit on critical in basic/aggressive
             if rule["severity"] == "critical" and self._level in ("basic", "aggressive"):
                 break
 
-        # 3. Score
+        # 3. Vector similarity detection
+        if self._embedder and self._corpus:
+            self._init_vectors()
+            try:
+                input_emb = self._embedder(sanitized)
+                seen = set()
+                for sample, corpus_emb in self._corpus_embeddings:
+                    sim = cosine_similarity(input_emb, corpus_emb)
+                    if sim < self._threshold:
+                        continue
+                    rule_id = f"VECTOR_{sample['label']}"
+                    if rule_id in seen:
+                        continue
+                    seen.add(rule_id)
+                    violations.append(Violation(
+                        rule=rule_id,
+                        category=sample.get("category", "injection"),
+                        severity="high",
+                        matched=f"similar to {sample['label']} ({sim:.0%})",
+                        confidence=sim,
+                        weight=int(sim * 70),
+                    ))
+            except Exception:
+                pass  # Vector detection failure is non-fatal
+
+        # 4. Score
         score = sum(v.weight for v in violations)
         verdict = _verdict_from_score(score)
 
-        # 4. PII redaction
+        # 5. PII redaction
         output = sanitized
         redactions = []
         if self._redact_pii:
