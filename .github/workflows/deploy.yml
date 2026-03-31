@@ -38,15 +38,6 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
-      - name: Create Artifact Registry repo if needed
-        run: |
-          gcloud artifacts repositories describe promptlock \
-            --location=$REGION --format="value(name)" 2>/dev/null || \
-          gcloud artifacts repositories create promptlock \
-            --repository-format=docker \
-            --location=$REGION \
-            --description="PromptLock container images"
-
       - name: Build and push container
         run: |
           gcloud auth configure-docker $REGISTRY --quiet
